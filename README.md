@@ -1,2 +1,3 @@
 # apache-serverstatus
-Trying to make a CLI view on apache's mod_status
+Proof of concept making a useful CLI view on apache's mod_status
+
