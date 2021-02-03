@@ -25,7 +25,7 @@ Options:
                         defaults to 127.0.0.1
 ```
 
-TODO:
+# TODO:
 - deal with non-ExtendedStatus output too
 - look at parsing outputs for other MPMs (it's currently aimed at prefork)
 - summarize acc, conn, child, and slot (currently omitted because they're more about reuse than current requests)
