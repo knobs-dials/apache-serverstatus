@@ -1,3 +1,3 @@
 # apache-serverstatus
-Proof of concept making a useful CLI view on apache's mod_status
+Making a useful CLI view on apache's mod_status. Proof of concept  version.
 
