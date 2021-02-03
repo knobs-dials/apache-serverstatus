@@ -1,6 +1,5 @@
-#!/usr/bin/python
-
-import os,sys, time, socket, urllib, urllib2, httplib 
+#!/usr/bin/python3
+import os,sys, time, socket, urllib
 
 import bs4
 try:
@@ -13,52 +12,10 @@ import helpers_shellcolor as sc
 
 
 
-def urlfetch(url, data=None, headers=None, raise_as_none=False, return_reqresp=False, timeout=60):
-    """ Returns:
-        - if return_reqresp==False (default), returns the data at an URL
-        - if return_reqresp==True,  returns the request and response objects (can be useful for streams)
-
-        data:           May be
-                        - a dict 
-                        - a sequence of tuples (will be encoded), 
-                        - a string (not altered - you often want to have used urllib.urlencode)
-                        When you use this parameter, the request becomes a POST instead of the default GET
-                         (and seems to force <tt>Content-type: application/x-www-form-urlencoded</tt>)
-        headers:        dict of additional headers  (each is add_header()'d)
-        raise_as_none:  In cases where you want to treat common connection failures as 'try again later',
-                         using True here can save a bunch of your own typing in error catching
-    """
-    try:
-        if type(data) in (tuple, dict):
-            data=urllib.urlencode(data)
-        req  = urllib2.Request(url, data=data)
-        if headers!=None: 
-            for k in headers:
-                vv = headers[k]
-                if type(vv) in (list,tuple):
-                    for v in vv: 
-                        req.add_header(k,v)
-                else: # assume single string. TODO: consider unicode
-                    req.add_header(k,vv)
-        response = urllib2.urlopen(req, timeout=timeout)
-        if return_reqresp:
-            return req,response
-        else:
-            data = response.read()
-            return data
-    except (socket.timeout), e:
-        if raise_as_none:
-            log( 'Timeout fetching %r'%url )
-            return None
-        else:
-            raise
-    except (socket.error, urllib2.URLError, httplib.HTTPException), e:
-        if raise_as_none:
-            #print 'Networking problem, %s: %s'%(e.__class__, str(e))
-            return None
-        else:
-            raise
-
+def urlfetch(url, timeout=60):
+    req  = urllib.request.Request(url)
+    response = urllib.request.urlopen(req, timeout=timeout)
+    return response.read()
 
 
 
@@ -122,8 +79,8 @@ host         = options.host
 urlbase = 'http://%s/server-status'%host
 try:
     urlfetch(urlbase, timeout=1)
-except urllib2.URLError:
-    print "ERROR: %r not reachable. Find out at what hostname it's exposed. You may need --host"%urlbase
+except urllib.error.URLError:
+    print( "ERROR: %r not reachable. Find out at what hostname it's exposed. You may need --host"%urlbase )
     sys.exit(0)
 
 
@@ -135,8 +92,8 @@ while True:
         try:
             data = urlfetch( urlbase+'?auto', timeout=1 )
         except socket.error as e: # assume   e.errno == 104: # Connection reset by peer
-            print sc.clearscreen()
-            print "Apache too busy or restarting, trying again in a second"
+            print( sc.clearscreen() )
+            print( "Apache too busy or restarting, trying again in a second" )
             time.sleep(1)            
             continue
         except urllib2.URLError: # assume timeout 
@@ -151,15 +108,15 @@ while True:
         for line in data.splitlines():
             if line[0]==' ': # trying to skip the table
                 continue
-            if ':' in line:
-                var, val = line.strip().split(':',1)
+            if b':' in line:
+                var, val = line.strip().split(b':',1)
                 vardata[var] = val.strip()
         if prevvars!=None:
             statrow=['Rates:']
 
-            statrow.append( '%5.0f KB/s'%(  (float(vardata['Total kBytes']) - float(prevvars['Total kBytes']))/timediff ) )
+            statrow.append( '%5.0f KB/s'%(  (float(vardata[b'Total kBytes']) - float(prevvars[b'Total kBytes']))/timediff ) )
             
-            total_rate = (  float(vardata['Total Accesses']) - float(prevvars['Total Accesses'])  ) / timediff 
+            total_rate = (  float(vardata[b'Total Accesses']) - float(prevvars[b'Total Accesses'])  ) / timediff 
             us_rate    = float(ourreqs)/timediff
             statrow.append( '~%5.1f req/s not counting this script'%( max(0,total_rate-us_rate)   ) )
             statrow.append( '%5.1f req/s total'%( total_rate ) )
@@ -181,8 +138,8 @@ while True:
         data = urlfetch( urlbase )
     except socket.error as e:
         #if e.errno == 104: # Connection reset by peer
-        print sc.clearscreen()
-        print "Apache too busy or restarting, trying again in a second"
+        print( sc.clearscreen() )
+        print( "Apache too busy or restarting, trying again in a second" )
         time.sleep(1)
         continue
     except urllib2.URLError: # assume timeout 
@@ -313,7 +270,7 @@ while True:
             workings += 1            
 
         ## Keep one line, if possible
-        #print `request`
+        #print( repr(request) )
         firstbit = 83+1
         if cols > firstbit:
             request = request[ :(cols-firstbit) ]
@@ -379,23 +336,23 @@ while True:
 
     
     ##
-    print sc.clearscreen()
+    print( sc.clearscreen() )
     
-    print '    '.join(stats) 
-    print statrow
+    print( '    '.join(stats) ) 
+    print( statrow )
     
-    print '' 
-    print ''
-    print ''.join(scoreboard)
-    print '' 
-    print ''
-    print '   pid       slot status   secago  mswork             client                vhost  request'
+    print( '' )
+    print( '' )
+    print( ''.join(scoreboard) )
+    print( '' )
+    print( '' )
+    print( '   pid       slot status   secago  mswork             client                vhost  request' )
     for msg in msgs:
-        print msg
+        print( msg )
 
-    print
-    print "Sorted by status,vhost,client"  # TODO: parametrize
-    print "Dark gray indicate less interesting details, like that of the most recent rather than the active request"
+    print( '' )
+    print( "Sorted by status,vhost,client")
+    print( "Dark gray indicate less interesting details, like that of the most recent rather than the active request" )
 
     time.sleep( interval_sec )
       
