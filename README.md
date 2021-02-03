@@ -26,4 +26,8 @@ Options:
 ```
 
 TODO:
+- deal with non-ExtendedStatus output too
 - look at parsing outputs for other MPMs (it's currently aimed at prefork)
+- summarize acc, conn, child, and slot (currently omitted because they're more about reuse than current requests)
+- make columns configutable
+- adapt vhost column size to maximum presented length
