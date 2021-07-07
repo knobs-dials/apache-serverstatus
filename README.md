@@ -1,5 +1,7 @@
 # apache-serverstatus
-A live CLI view on apache's mod_status.  Proof of concept version.
+A live CLI view on apache's mod_status.
+
+Proof of concept version, currently mainly for prefork.
 
 # screenshot
 ![screenshot](https://raw.githubusercontent.com/scarfboy/apache-serverstatus/main/screenshot.png)
