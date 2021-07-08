@@ -1,7 +1,7 @@
 #!/usr/bin/python3
 import os,sys, time, socket, urllib
-
 import bs4
+
 try:
     import setproctitle
     setproctitle.setproctitle( os.path.basename(sys.argv[0]) )
@@ -33,326 +33,356 @@ m_exp = {
     '.':(11,'unused slot',     sc.darkgrey),
 }
 
-lastvarfetch = 0.0
-prevvars = None
-statrow = ''
-
-ourreqs = 0
 
 
-# non-wrapping code tries to adapt to console size changes
-cols = None
-def update_cols():
-    global cols
-    cols = sc.tty_size()['cols']
-update_cols()
-try:
-    import signal
-    signal.signal(signal.SIGWINCH,  lambda signum,sframe: update_cols() )
-except: # haven't figured out all the things that might fail
-    raise
-    pass
 
+class Fetcher(object):
+    
+    
+    def __init__(self, urlbase ):
+        self.lastvarfetch = 0.0
+        self.prevvars = None
+        self.overall = {}
+        self.ourreqs = 0
+        self.vardata = {}
 
-from optparse import OptionParser    
-p = OptionParser() 
-p.add_option("-i", "--interval-sec",
-                 dest="interval", default='0.25', action="store",
-                 help="Poll interval, in seconds. Defaults to 0.25")
-p.add_option("-p", "--no-chop-port",
-                 dest="chopport", default=True, action="store_false",
-                 help="By default we chop post off vhost for readability. Use this if you want to see those.")
-p.add_option("-v", "--chop-vhost",
-                 dest="vchop", default='1', action="store",
-                 help="Chop off parts from the end of vhost. Defaults to 1, aiming to remove .com or such. Will refuse to remove everything, so a high value shows the first part of every name. ")
-p.add_option("-u", "--host",
-                 dest="host", default='127.0.0.1', action="store",
-                 help="We basically fetch http://THIS/server-status  so this defaults to 127.0.0.1")
-options, args = p.parse_args()
+    def fetch(self):
+        '''
+            Returns one of
+            - False, to signal it couldn't reach the URL, or it timed out
+            - a dict
 
+        '''
+        ret = {}
 
-interval_sec = float(options.interval)
-chopport     = options.chopport
-vchop        = int(options.vchop)
-host         = options.host
+        ### fetch overall status at most onece per second  (also for rates to be more of an average thing)
+        now = time.time()
+        timediff = now - self.lastvarfetch
+        if timediff > 1.0:
+            try:
+                text = urlfetch( urlbase+'?auto', timeout=1 )
+            except socket.error as e: # assume   e.errno == 104: # Connection reset by peer
+                return False
+            except urllib2.URLError: # assume timeout
+                return False
 
-urlbase = 'http://%s/server-status'%host
-try:
-    urlfetch(urlbase, timeout=1)
-except urllib.error.URLError:
-    print( "ERROR: %r not reachable. Find out at what hostname it's exposed. You may need --host"%urlbase )
-    sys.exit(0)
+            self.ourreqs += 1
+            self.lastvarfetch = time.time()
 
+            self.vardata = {}
+            for line in text.splitlines():
+                if line[0]==' ': # trying to skip the table
+                    continue
+                if b':' in line:
+                    var, val = line.strip().split(b':',1)
+                    self.vardata[var] = val.strip()
 
-while True:
-    # overall status (text), fetch this at most onece per second (also for good rates)
-    now = time.time()
-    timediff = now - lastvarfetch
-    if timediff > 1:
+            if self.prevvars != None: # all but the first
+                self.overall['bytes_moved']    = 1024.* ( float(self.vardata[b'Total kBytes'])   - float(self.prevvars[b'Total kBytes']) )
+                self.overall['num_requests']   =          float(self.vardata[b'Total Accesses']) - float(self.prevvars[b'Total Accesses'])
+                self.overall['reqrate_total']  =       (self.overall['num_requests']               )  / timediff
+                self.overall['reqrate_real']   = max(0,(self.overall['num_requests'] - self.ourreqs)) / timediff
+                self.overall['byte_rate']      = self.overall['bytes_moved'] / timediff
+                # CONSIDER using
+                #  ServerUptimeSeconds  and maybe RestartTime
+                #  BusyWorkers
+                #  IdleWorkers
+                #  ScoreBoard      because it seems to consider spares
+                #  CPU* stuff once I figure out exactly what that says and that it's useful
+            
+            self.prevvars = self.vardata
+            self.ourreqs = 0 # we use this count only for the rates
+            
+        # always return, but they only change every second
+        ret.update( self.overall )                
+
+        ### worker status (html)
         try:
-            data = urlfetch( urlbase+'?auto', timeout=1 )
-        except socket.error as e: # assume   e.errno == 104: # Connection reset by peer
-            print( sc.clearscreen() )
-            print( "Apache too busy or restarting, trying again in a second" )
-            time.sleep(1)            
-            continue
+            data = urlfetch( urlbase )
+        except socket.error as e:
+            return False
         except urllib2.URLError: # assume timeout 
-            # TODO: figure out what to say
-            time.sleep(1)            
-            continue
+            return False
+        self.ourreqs += 1
+        soup = bs4.BeautifulSoup(data, 'html5lib') # seems to be well formed enough for that parser, anyway
+        table = soup.find('table')
+        data = [] # maybe a name like rows would be clearer?
+
+        for tr in table.findAll('tr')[2:]:
+            #  srv      server child number - generaton
+            #  pid
+            #  acc      is accesses this connection / this child / this slot
+            #  m        mode of operation
+            #  cpu      cpu-seconds
+            #  ss       seconds since start of most recent requests
+            #  req      milliseconds used to handle most recent request
+            #  conn     kbytes transferred this connection
+            #  child    mbytes transferred this child
+            #  slot     mbytes transferred this slot
+            #  client   
+            #  protocol 
+            #  vhost    
+            #  request  
+            l = list( ' '.join(elem.findAll(text=True)).strip()   for elem in tr.findAll('td')) # note that that's all strings
+            for ncol in (4,5,6,7,8,9): # numeric columns
+                l[ncol] = float( l[ncol] )
             
+            sortkey = 0
+            mexp = ''
+            colorf = lambda s:s
+            if l[3] in m_exp: # status
+                sortkey, mexp, colorf = m_exp[ l[3] ]
+                
+            ap = [sortkey, colorf, mexp]        
+            ap.extend( l ) # the row data
             
-        ourreqs+=1
-        lastvarfetch = time.time()
-        vardata = {}
-        for line in data.splitlines():
-            if line[0]==' ': # trying to skip the table
-                continue
-            if b':' in line:
-                var, val = line.strip().split(b':',1)
-                vardata[var] = val.strip()
-        if prevvars!=None:
-            statrow=['Rates:']
-
-            statrow.append( '%5.0f KB/s'%(  (float(vardata[b'Total kBytes']) - float(prevvars[b'Total kBytes']))/timediff ) )
+            data.append( ap )
             
-            total_rate = (  float(vardata[b'Total Accesses']) - float(prevvars[b'Total Accesses'])  ) / timediff 
-            us_rate    = float(ourreqs)/timediff
-            statrow.append( '~%5.1f req/s not counting this script'%( max(0,total_rate-us_rate)   ) )
-            statrow.append( '%5.1f req/s total'%( total_rate ) )
+        sorted_data = sorted(data, key=lambda it: (it[0],it[15],it[14]) ) # client, vhost, status(-via-sort-key-in-m_exp), pid
 
-            # CONSIDER using
-            #  ServerUptimeSeconds  and maybe RestartTime
-            #  BusyWorkers
-            #  IdleWorkers
-            #  ScoreBoard      because it seems to consider spares
-            #  CPU* stuff once I figure out exactly what that says and that it's useful            
-            statrow = '   '.join(statrow) 
-            ourreqs = 0
-        prevvars = vardata
-
-
+        ret['scoreboard_unsorted'] = list( it[6] for it in data )
+        ret['scoreboard_sorted']   = list( it[6] for it in sorted_data )
         
-    # worker status (html)
+        ret['slot_data'] = sorted_data
+        
+        return ret
+        
+    
+if __name__ == '__main__':
+
+    # the non-wrapping code tries to show as much as it can on one line by adapting to console size changes
+    cols = None
+    def update_cols():
+        global cols
+        cols = sc.tty_size()['cols']
+    update_cols()
     try:
-        data = urlfetch( urlbase )
-    except socket.error as e:
-        #if e.errno == 104: # Connection reset by peer
-        print( sc.clearscreen() )
-        print( "Apache too busy or restarting, trying again in a second" )
-        time.sleep(1)
-        continue
-    except urllib2.URLError: # assume timeout 
-        # TODO: figure out what to say
-        time.sleep(1)            
-        continue
+        import signal
+        signal.signal(signal.SIGWINCH,  lambda signum,sframe: update_cols() )
+    except: # haven't figured out all the things that might fail
+        raise
+        pass
 
-    ourreqs+=1
-    soup = bs4.BeautifulSoup(data, 'html5lib') # seems to be well formed enough, anyway
-    table = soup.find('table')
-    
-    data = []
-    
-    for tr in table.findAll('tr')[2:]:
-        colorf = lambda s:s
-        sortkey = 0
-        
-        l = list( ' '.join(elem.findAll(text=True)).strip()   for elem in tr.findAll('td')) # note that that's all strings
-        
-        m = l[3]
-        mexp = ''
-        if m in m_exp:
-            sortkey, mexp, colorf = m_exp[ m ]
-            
-        ap = [sortkey, colorf, mexp]        
-        ap.extend( l )
-        data.append( ap )
-    
-    sorted_data = sorted(data, key=lambda it: (it[0],it[15],it[14]) ) # client, vhost, status(-via-sort-key-in-m_exp), pid
 
-    msgs = []
-    scoreboard = [] 
-    unusedslots, waitingconns, workings,ourselves, closings, keepalives = 0,0,0,0,0,0
-    for sortkey,colorf,mexp,  srv, pid, acc, m, cpu, ss, req, conn, child, slot, client, protocol, vhost, request  in sorted_data:
-        # srv     server child number - generaton
-        # acc     is accesses this connection / this child / this slot
-        # m       mode of operation
-        # cpu     cpu-seconds
-        # ss      seconds since start of most recent requests
-        # req     milliseconds used to handle most recent request
-        # conn    kbytes transferred this connection
-        # child   mbytes transferred this child
-        # slot    mbytes transferred this slot
+    from optparse import OptionParser    
+    p = OptionParser() 
+    p.add_option("-i", "--interval-sec",
+                     dest="interval", default='0.25', action="store",
+                     help="Poll interval, in seconds. Defaults to 0.25")
+    p.add_option("-p", "--no-chop-port",
+                     dest="chopport", default=True, action="store_false",
+                     help="By default we chop post off vhost for readability. Use this if you want to see those.")
+    p.add_option("-U", "--show-unused",
+                     dest="show_unused", default=False, action="store_true",
+                     help="print unused slots in listing. Defaults is not to.")
+    p.add_option("-v", "--chop-vhost",
+                     dest="vchop", default='1', action="store",
+                     help="Chop off parts from the end of vhost. Defaults to 1, aiming to remove .com or such. Will refuse to remove everything, so a high value shows the first part of every name. ")
+    p.add_option("-u", "--host",
+                     dest="host", default='127.0.0.1', action="store",
+                     help="We basically fetch http://THIS/server-status  so this defaults to 127.0.0.1")
+    options, args = p.parse_args()
 
-        reqval = float(req)
-        ssval  = float(ss)
-        scoreboard.append( m )
 
-        #raise ValueError( vhost )
-        # simplified formatting - put on parameters
+    interval_sec = float(options.interval)
+    chopport     = options.chopport
+    vchop        = int(options.vchop)
+    host         = options.host
 
-        port=''
-        if ':' in vhost:
-            vhost, port = vhost.rsplit(':',1)
-            
-        if '.' in vhost:
-            vlist = vhost.split('.')
-            chopn = min(vchop, len(vlist)-1)
-            if chopn>0:
-                vhost = '.'.join( vlist[:-chopn] )
+    urlbase = 'http://%s/server-status'%host
 
-        if (not chopport) and port!='':
-            vhost+=':'+port 
-                
-        #if request.endswith(' HTTP/1.1'): # note that this can be truncated so doesn't always match
-        #    request = request[:-9].strip()        
+    # check reachability, to give a nicer message.
+    try:
+        urlfetch(urlbase, timeout=1)
+    except urllib.error.URLError:
+        print( "ERROR: %r not reachable.  If it's not at %s, you may need tp specify where it is via--host.  Consider what it's listening on, and that it may be firewalled from where this is run. "%urlbase )
+        sys.exit(0)
 
-        # These go first because spome details are of the most recent request, not the active one, so we probably want to omit that
-        if m=='_': 
-            waitingconns += 1
-            if float(req)>300:
-                req     = sc.red( req     )                
-            elif float(req)>150:
-                req     = sc.yellow( req     )                
-            client  = sc.darkgray( client  )
-            vhost   = sc.darkgray( vhost   )
-            request = sc.darkgray( request )
-        # TODO: 
-        #if ssval > 240:
-            ss = sc.darkgray( ss )
-            #continue            
+    f = Fetcher( urlbase )
+         
+    while True:
+        status = f.fetch()
 
-        elif m=='.':
-            unusedslots += 1
-            req     = sc.darkgray( req     )
-            client  = sc.darkgray( client  )
-            vhost   = sc.darkgray( vhost   )
-            request = sc.darkgray( request )
-            continue # TODO: parametrize
-
-        elif m=='K':
-            keepalives += 1
-            #continue
-            req     = sc.darkgray( req     )
-            request = sc.darkgray( request )
-            ss      = sc.darkgray( ss )
-
-        elif m in 'RW':
-            #req is presumably always 0 because the request isn't done?
-            req     = ''
-            if ssval > 5:
-                ss = sc.brightred( ss )                
-            elif ssval > 2:
-                ss = sc.red( ss )
-            elif ssval > 1:
-                ss = sc.yellow( ss )
-            else:
-                ss = sc.darkgray( ss )
-                
-        else:
-            if reqval > 300:
-                req = sc.red( req )
-            elif reqval > 40:
-                req = sc.yellow( req )
-            else:
-                pass
-            
-            
-        if '/server-status' in request and m not in '_.':
-            ourselves+=1
+        if status == False:
+            print( sc.clearscreen() )
+            print( "Apache too busy or restarting" )
+            time.sleep(1) 
             continue
+
+        statrow = []
+        if 'byte_rate' in status: # not the first loop
+            statrow.append( 'Rates:' )
+            statrow.append( '%5d kByte/s'%(status['byte_rate']/1024.) )
+            statrow.append( '~%5.1f req/s not counting this script'%( status['reqrate_real']   ) )
+            statrow.append( '%5.1f req/s total'%( status['reqrate_total'] ) )
+        statrow = '   '.join(statrow)
         
-        if m=='C':
-            closings += 1
-            #continue
+        msgs = []
+        scoreboard = status['scoreboard_unsorted']
+        unusedslots, waitingconns, workings,ourselves, closings, keepalives = 0,0,0,0,0,0
+        for sortkey,colorf,mexp,  srv, pid, acc, m, cpu, ss, req, conn, child, slot, client, protocol, vhost, request  in status['slot_data']:
 
-        if m in ('RW'):
-            workings += 1            
+            ## try to declutter some string
+            port = ''
+            if ':' in vhost:
+                vhost, port = vhost.rsplit(':',1)
 
-        ## Keep one line, if possible
-        #print( repr(request) )
-        firstbit = 83+1
-        if cols > firstbit:
-            request = request[ :(cols-firstbit) ]
+            if '.' in vhost:
+                vlist = vhost.split('.')
+                chopn = min(vchop, len(vlist)-1)
+                if chopn > 0:
+                    vhost = '.'.join( vlist[:-chopn] )
+
+            if (not chopport) and port!='':
+                vhost += ':'+port 
+            # CONSIDER: removing HTTP/1.1 - but this can be truncated so doesn't always match
+
             
-        msg = sc.cformat( # color escape code aware percent formatter (but iirc does mainly %s right now?)
-            '%6s %15s %s  %7s %5s   |  %15s %20s  %s',
-            (
-                sc.RESET+pid+sc.RESET,
-                colorf(mexp)+sc.RESET,
-                colorf(m)+sc.RESET, 
-                ss+sc.RESET,
-                req+sc.RESET,
-                client+sc.RESET,
-                vhost+sc.RESET,
-                request+sc.RESET,
+            ### conditionally change what to recolor, or hide completely
+            ss_s  = '%d'%ss # defaults
+            req_s = '%d'%req
+            
+            # These go first because some details are of the most recent request, not the active one, so we probably want to omit that
+            if m=='_':  # waiting - details are of the most recent request
+                waitingconns += 1
+                if float(req)>300:
+                    req_s   = sc.red( '%d'%req )                
+                elif float(req)>150:
+                    req_s   = sc.yellow( '%d'%req )                
+                client  = sc.darkgray( client  )
+                vhost   = sc.darkgray( vhost   )
+                request = sc.darkgray( request )
+
+            elif m=='.': # unused slot
+                if options.show_unused:
+                    unusedslots += 1
+                    req_s   = sc.darkgray( '%d'%req )
+                    client  = sc.darkgray( client   )
+                    vhost   = sc.darkgray( vhost    )
+                    request = sc.darkgray( request  )
+                else:
+                    continue
+
+            elif m=='K':
+                keepalives += 1
+                req_s   = sc.darkgray( '%d'%req )
+                request = sc.darkgray( request  )
+                ss      = sc.darkgray( '%.1f'%ss  )
+
+            elif m in 'RW':
+                #req is presumably always 0 because the request isn't done?
+                req     = ''
+                if ss > 5:
+                    ss_s = sc.brightred( ss_s )
+                elif ss > 2:
+                    ss_s = sc.red( ss_s )
+                elif ss > 1:
+                    ss_s = sc.yellow( ss_s )
+                else:
+                    ss_s = sc.darkgray( ss_s )
+
+            else: # e.g. closing
+                if req > 300:
+                    req_s = sc.red( '%d'%req )
+                elif req > 40:
+                    req_s = sc.yellow( '%d'%req )
+                else:
+                    pass
+
+
+            if '/server-status' in request and m not in '_.':
+                ourselves += 1
+                continue
+
+            if m=='C':
+                closings += 1
+                #continue
+
+            if m in ('RW'):
+                workings += 1            
+
+            ## Keep one line, if possible
+            #print( repr(request) )
+            firstbit = 83+1
+            if cols > firstbit:
+                request = request[ :(cols-firstbit) ]
+
+            msg = sc.cformat( # color escape code aware percent formatter (but iirc does mainly %s right now?)
+                '%6s %15s %s  %7s %5s   |  %15s %20s  %s',
+                (
+                    sc.RESET+pid+sc.RESET,
+                    colorf(mexp)+sc.RESET,
+                    colorf(m)+sc.RESET, 
+                    ss_s+sc.RESET,
+                    req_s+sc.RESET,
+                    client+sc.RESET,
+                    vhost+sc.RESET,
+                    request+sc.RESET,
+                )
             )
-        )
-        
-        msgs.append( msg )
 
-    ## 
-    numcurrentslots = len(scoreboard)
-    stats=['Current slots:%d'%numcurrentslots]
-    
-    s =  'wait for conn:%3d'%waitingconns
-    if waitingconns>0:
-        s = sc.green(s)
-    elif waitingconns>3: # arbitrary
-        s = sc.yellow(s)
-    stats.append(s)
+            msgs.append( msg )
 
-    #s = 'probably regular connections: %2d'%problyregular
-    #stats.append(s)
+        ## 
+        numcurrentslots = len(scoreboard)
+        stats=['Slots:      current:%d'%numcurrentslots]
 
-    
-    s = 'working:%2d (of which statusfetch:%2d)'%(workings, ourselves)
-    #s = sc.yellow(s)
-    stats.append(s)
+        s =  'waiting for conn:%3d'%waitingconns
+        if waitingconns>0:
+            s = sc.green(s)
+        elif waitingconns>3: # arbitrary
+            s = sc.yellow(s)
+        stats.append(s)
 
-    
-    s = 'keepalives:%3d'%( keepalives )
-    if keepalives>0:
-        s = sc.green(s)
-    else:
-        s = sc.yellow(s) 
-    stats.append(s)
-    
-    s = 'closing:%2d'%closings
-    if closings <= 2: # arbitrary, not sure
-        s = sc.green(s)
-    else:
-        s = sc.yellow(s) # normal on any server that sees any use
-    stats.append(s)
+        #s = 'probably regular connections: %2d'%problyregular
+        #stats.append(s)
 
-    s = 'unused:%3d '%( unusedslots )
-    if unusedslots==0:
-        s = sc.red(s)
-    elif unusedslots<5: # arbitrary, maybe base on fraction istead?
-        s = sc.yellow(s)
-    else:
-        s = sc.green(s)
-    stats.append(s)
 
-    
-    ##
-    print( sc.clearscreen() )
-    
-    print( '    '.join(stats) ) 
-    print( statrow )
-    
-    print( '' )
-    print( '' )
-    print( ''.join(scoreboard) )
-    print( '' )
-    print( '' )
-    print( '   pid       slot status   secago  mswork             client                vhost  request' )
-    for msg in msgs:
-        print( msg )
+        s = 'working:%2d (of which statusfetch:%2d)'%(workings, ourselves)
+        #s = sc.yellow(s)
+        stats.append(s)
 
-    print( '' )
-    print( "Sorted by status,vhost,client")
-    print( "Dark gray indicate less interesting details, like that of the most recent rather than the active request" )
 
-    time.sleep( interval_sec )
-      
+        s = 'keepalives:%3d'%( keepalives )
+        if keepalives>0:
+            s = sc.green(s)
+        else:
+            s = sc.yellow(s) 
+        stats.append(s)
+
+        s = 'closing:%2d'%closings
+        if closings <= 2: # arbitrary, not sure
+            s = sc.green(s)
+        else:
+            s = sc.yellow(s) # normal on any server that sees any use
+        stats.append(s)
+
+        s = 'unused:%3d '%( unusedslots )
+        if unusedslots==0:
+            s = sc.red(s)
+        elif unusedslots<5: # arbitrary, maybe base on fraction istead?
+            s = sc.yellow(s)
+        else:
+            s = sc.green(s)
+        stats.append(s)
+
+
+        ##
+        print( sc.clearscreen() )
+
+        print( '    '.join(stats) ) 
+        print( statrow )
+
+        print( 'Scoreboard: '+''.join(scoreboard) )
+        print( '' )
+        print( '' )
+        print( '   pid       slot status   secago  mswork             client                vhost  request' )
+        for msg in msgs:
+            print( msg )
+
+        print( '' )
+        print( "Sorted by status,vhost,client")
+        print( "Dark gray indicate less interesting details, like that of the most recent rather than the active request" )
+
+        time.sleep( interval_sec )
+
