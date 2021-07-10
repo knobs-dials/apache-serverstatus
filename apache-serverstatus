@@ -37,8 +37,8 @@ m_exp = {
 
 
 class Fetcher(object):
-    
-    
+    ''' Fetches and parser server-status table, currently for prefork 
+    '''  
     def __init__(self, urlbase ):
         self.lastvarfetch = 0.0
         self.prevvars = None
@@ -52,6 +52,8 @@ class Fetcher(object):
             - False, to signal it couldn't reach the URL, or it timed out
             - a dict
 
+            TODO: return slots in a nicer form, probably a dict?
+            CONSIDER: rate limiting?
         '''
         ret = {}
 
@@ -78,6 +80,7 @@ class Fetcher(object):
                     self.vardata[var] = val.strip()
 
             if self.prevvars != None: # all but the first
+                # some of this is sort of present in the normal table, but only in averaged/rounded form
                 self.overall['bytes_moved']    = 1024.* ( float(self.vardata[b'Total kBytes'])   - float(self.prevvars[b'Total kBytes']) )
                 self.overall['num_requests']   =          float(self.vardata[b'Total Accesses']) - float(self.prevvars[b'Total Accesses'])
                 self.overall['reqrate_total']  =       (self.overall['num_requests']               )  / timediff
@@ -254,8 +257,8 @@ if __name__ == '__main__':
                 request = sc.darkgray( request )
 
             elif m=='.': # unused slot
+                unusedslots += 1
                 if options.show_unused:
-                    unusedslots += 1
                     req_s   = sc.darkgray( '%d'%req )
                     client  = sc.darkgray( client   )
                     vhost   = sc.darkgray( vhost    )
@@ -271,7 +274,8 @@ if __name__ == '__main__':
 
             elif m in 'RW':
                 #req is presumably always 0 because the request isn't done?
-                req     = ''
+                req_s  = ''
+
                 if ss > 5:
                     ss_s = sc.brightred( ss_s )
                 elif ss > 2:
@@ -281,7 +285,16 @@ if __name__ == '__main__':
                 else:
                     ss_s = sc.darkgray( ss_s )
 
-            else: # e.g. closing
+            elif m in 'C':
+                if ss > 5:
+                    ss_s = sc.brightred( ss_s )
+                elif ss > 2:
+                    ss_s = sc.red( ss_s )
+                elif ss > 1:
+                    ss_s = sc.yellow( ss_s )
+                else:
+                    ss_s = sc.darkgray( ss_s )
+                    
                 if req > 300:
                     req_s = sc.red( '%d'%req )
                 elif req > 40:
@@ -289,6 +302,15 @@ if __name__ == '__main__':
                 else:
                     pass
 
+            else: # e.g. starting, closing, DNS, logging, graceful finish, idle cleanup
+                request = sc.darkgray( request )                    
+                if req > 300:
+                    req_s = sc.red( '%d'%req )
+                elif req > 40:
+                    req_s = sc.yellow( '%d'%req )
+                else:
+                    pass
+                
 
             if '/server-status' in request and m not in '_.':
                 ourselves += 1
