@@ -1,4 +1,5 @@
 #!/usr/bin/python3
+
 import os,sys, time, socket, urllib
 import bs4
 
@@ -11,13 +12,10 @@ except ImportError:
 import helpers_shellcolor as sc
 
 
-
 def urlfetch(url, timeout=60):
     req  = urllib.request.Request(url)
     response = urllib.request.urlopen(req, timeout=timeout)
     return response.read()
-
-
 
 m_exp = {
     '_':(1, 'wait for conn',   sc.green),
@@ -34,11 +32,8 @@ m_exp = {
 }
 
 
-
-
 class Fetcher(object):
-    ''' Fetches and parser server-status table, currently for prefork 
-    '''  
+    ''' Fetches and parser server-status table, currently for prefork '''  
     def __init__(self, urlbase ):
         self.lastvarfetch = 0.0
         self.prevvars = None
@@ -198,7 +193,7 @@ if __name__ == '__main__':
     try:
         urlfetch(urlbase, timeout=1)
     except urllib.error.URLError:
-        print( "ERROR: %r not reachable.  If it's not at %s, you may need tp specify where it is via--host.  Consider what it's listening on, and that it may be firewalled from where this is run. "%urlbase )
+        print( "ERROR: %r not reachable.  You may need tp specify where it is using --host.  Consider what it's listening on, and that it may be firewalled from where this is run. "%urlbase )
         sys.exit(0)
 
     f = Fetcher( urlbase )
