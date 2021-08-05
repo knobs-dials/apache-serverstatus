@@ -1,5 +1,5 @@
 # apache-serverstatus
-A live CLI view on apache's ![mod_status](https://httpd.apache.org/docs/2.4/mod/mod_status.html).
+A live CLI view on apache's [mod_status](https://httpd.apache.org/docs/2.4/mod/mod_status.html).
 
 Proof of concept version, and currently mainly parses status output for prefork.
 
