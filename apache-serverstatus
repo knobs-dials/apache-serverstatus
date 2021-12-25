@@ -1,7 +1,16 @@
 #!/usr/bin/python3
 
 import os,sys, time, socket, urllib
+
+try:
+    import cchardet
+    #print("yay cchardet")
+except:
+    #print("nay cchardet")
+    pass
+
 import bs4
+
 
 try:
     import setproctitle
@@ -60,7 +69,7 @@ class Fetcher(object):
                 text = urlfetch( urlbase+'?auto', timeout=1 )
             except socket.error as e: # assume   e.errno == 104: # Connection reset by peer
                 return False
-            except urllib2.URLError: # assume timeout
+            except Exception: # assume timeout
                 return False
 
             self.ourreqs += 1
@@ -99,10 +108,11 @@ class Fetcher(object):
             data = urlfetch( urlbase )
         except socket.error as e:
             return False
-        except urllib2.URLError: # assume timeout 
+        except Exception: # assume timeout 
             return False
         self.ourreqs += 1
-        soup = bs4.BeautifulSoup(data, 'html5lib') # seems to be well formed enough for that parser, anyway
+        soup = bs4.BeautifulSoup(data, 'lxml') # seems to be well formed enough for that parser, anyway
+        #soup = bs4.BeautifulSoup(data, 'html5lib') # seems to be well formed enough for that parser, anyway
         table = soup.find('table')
         data = [] # maybe a name like rows would be clearer?
 
@@ -178,7 +188,7 @@ if __name__ == '__main__':
                      help="Chop off parts from the end of vhost. Defaults to 1, aiming to remove .com or such. Will refuse to remove everything, so a high value shows the first part of every name. ")
     p.add_option("-u", "--host",
                      dest="host", default='127.0.0.1', action="store",
-                     help="We basically fetch http://THIS/server-status  so this defaults to 127.0.0.1")
+                     help="We basically fetch http://THIS/server-status  Default: '127.0.0.1'")
     options, args = p.parse_args()
 
 
@@ -212,7 +222,7 @@ if __name__ == '__main__':
             statrow.append( 'Rates:' )
             statrow.append( '%5d kByte/s'%(status['byte_rate']/1024.) )
             statrow.append( '~%5.1f req/s not counting this script'%( status['reqrate_real']   ) )
-            statrow.append( '%5.1f req/s total'%( status['reqrate_total'] ) )
+            statrow.append( sc.darkgray('%5.1f req/s total'%( status['reqrate_total'] ) ) )
         statrow = '   '.join(statrow)
         
         msgs = []
