@@ -1,7 +1,9 @@
 # apache-serverstatus
-A live CLI view on apache's [mod_status](https://httpd.apache.org/docs/2.4/mod/mod_status.html).
+A live  view on apache's [mod_status](https://httpd.apache.org/docs/2.4/mod/mod_status.html) in the shell.
 
-Proof of concept version, and currently only tested on prefork - I assume all others vary their output (I know that some do).
+Proof of concept version, to see how useful it is diagnosing handler issues. 
+
+Currently only tested on prefork - I assume all others vary their output (I know that some do).
 
 # screenshot
 ![screenshot](https://raw.githubusercontent.com/scarfboy/apache-serverstatus/main/screenshot.png)
