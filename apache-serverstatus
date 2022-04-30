@@ -1,75 +1,69 @@
 #!/usr/bin/python3
-
 import os,sys, time, socket, urllib
-
-try:
-    import cchardet
-    #print("yay cchardet")
-except:
-    #print("nay cchardet")
-    pass
-
 import bs4
-
-
-try:
-    import setproctitle
-    setproctitle.setproctitle( os.path.basename(sys.argv[0]) )
-except ImportError:
-    pass
-
 import helpers_shellcolor as sc
 
 
-def urlfetch(url, timeout=60):
+def _urlfetch(url, timeout_sec=20):
     req  = urllib.request.Request(url)
-    response = urllib.request.urlopen(req, timeout=timeout)
+    response = urllib.request.urlopen(req, timeout=timeout_sec)
     return response.read()
 
-m_exp = {
-    '_':(1, 'wait for conn',   sc.green),
-    'S':(2, 'starting up',     sc.blue),
-    'R':(3, 'read request',    sc.yellow),
-    'W':(4, 'write reply',     sc.yellow),
-    'K':(5, 'keepalive',       sc.cyan),
-    'C':(6, 'closing conn',    sc.magenta),
-    'D':(7, 'DNS lookup',      sc.blue), # meaning what? reverse for logging?
-    'L':(8, 'logging',         sc.blue),
-    'G':(9, 'graceful finish', sc.magenta),
-    'I':(10,'idle cleanup',    sc.magenta),
-    '.':(11,'unused slot',     sc.darkgrey),
+m_exp = { # first column is a sorting key
+    '_':(11, 'wait for conn',   sc.green),
+    'S':(2,  'starting up',     sc.blue),
+    'R':(3,  'read request',    sc.yellow),
+    'W':(4,  'write reply',     sc.yellow),
+    'K':(5,  'keepalive',       sc.cyan),
+    'C':(6,  'closing conn',    sc.magenta),
+    'D':(7,  'DNS lookup',      sc.blue), # meaning what? reverse lookup for logging?
+    'L':(8,  'logging',         sc.blue),
+    'G':(9,  'graceful finish', sc.magenta),
+    'I':(10, 'idle cleanup',    sc.magenta),
+    '.':(12, 'unused slot',     sc.darkgrey),
 }
 
 
-class Fetcher(object):
-    ''' Fetches and parser server-status table, currently for prefork '''  
+class ApacheStatusFetcher(object):
+    ''' Fetches and parser server-status table, currently for prefork only
+    
+        TODO: do for more than prefork,  probably based on the value of vardata['ServerMPM']
+    '''  
     def __init__(self, urlbase ):
         self.lastvarfetch = 0.0
         self.prevvars = None
-        self.overall = {}
+        self.vardata = {} # various status in key:val form, values unparsed strings, and we're not using most of the keys
+        self.overall = {} # some summarized things, based on vardata
         self.ourreqs = 0
-        self.vardata = {}
+        self.urlbase = urlbase
 
-    def fetch(self):
-        '''
-            Returns one of
+    def fetch(self, overall_rate_limit_sec=1.0):
+        ''' Returns one of
             - False, to signal it couldn't reach the URL, or it timed out
-            - a dict
+            - a dict with all the status we want
+                Keys of that dict include:
+                * 'bytes_moved', 'byte_rate',  'num_requests', 'reqrate_total', 'reqrate_real'
+                   the fetches the above comes from is rate-limited, so the values will change at most once per second (by default)
+                * 'slot_data' 
+                   list of (sortkey, color_func, status_string,  srv, pid, acc, m, cpu, ss, req, conn, child, slot, client, protocol, vhost, request) tuples
+                * 'scoreboard_unsorted', 'scoreboard_sorted' 
+                   string with the characters apache uses
 
-            TODO: return slots in a nicer form, probably a dict?
-            CONSIDER: rate limiting?
+            CONSIDER: return slots in a nicer form, probably a dict?
+            CONSIDER: rate limiting the slot fetch as well
         '''
         ret = {}
 
-        ### fetch overall status at most onece per second  (also for rates to be more of an average thing)
+        ### FETCH 1: overall status
+        #  limited these at most onece per second - no more load than necessary, and makes rates more of an average thing
         now = time.time()
         timediff = now - self.lastvarfetch
-        if timediff > 1.0:
+        if timediff > overall_rate_limit_sec:
             try:
-                text = urlfetch( urlbase+'?auto', timeout=1 )
-            except socket.error as e: # assume   e.errno == 104: # Connection reset by peer
+                text = _urlfetch( self.urlbase+'?auto', timeout_sec=1 )
+            except socket.error as e: # assume   e.errno == 104: # which is Connection reset by peer
                 return False
-            except Exception: # assume timeout
+            except Exception: # assume timeout   TODO: more specific exception
                 return False
 
             self.ourreqs += 1
@@ -90,32 +84,29 @@ class Fetcher(object):
                 self.overall['reqrate_total']  =       (self.overall['num_requests']               )  / timediff
                 self.overall['reqrate_real']   = max(0,(self.overall['num_requests'] - self.ourreqs)) / timediff
                 self.overall['byte_rate']      = self.overall['bytes_moved'] / timediff
-                # CONSIDER using
-                #  ServerUptimeSeconds  and maybe RestartTime
-                #  BusyWorkers
-                #  IdleWorkers
-                #  ScoreBoard      because it seems to consider spares
-                #  CPU* stuff once I figure out exactly what that says and that it's useful
+                #  Consider working in:
+                #   ServerUptimeSeconds and maybe RestartTime,   BusyWorkers,   IdleWorkers,    ScoreBoard      because it seems to consider spares
+                #   CPU* and/or Cache* stuff once I figure out exactly what that says and that it's useful
             
-            self.prevvars = self.vardata
-            self.ourreqs = 0 # we use this count only for the rates
-            
-        # always return, but they only change every second
-        ret.update( self.overall )                
+            # these help calculate some rates
+            self.prevvars = self.vardata 
+            self.ourreqs = 0 # only used for the rates
+        
+        ret.update( self.overall )  # set above fetch's data, regardless of whether it changed
 
-        ### worker status (html)
+
+        ### FETCH 2: worker status (html)
         try:
-            data = urlfetch( urlbase )
+            status_page = _urlfetch( self.urlbase )
         except socket.error as e:
             return False
-        except Exception: # assume timeout 
+        except Exception:# assume timeout   TODO: more specific exception
             return False
         self.ourreqs += 1
-        soup = bs4.BeautifulSoup(data, 'lxml') # seems to be well formed enough for that parser, anyway
-        #soup = bs4.BeautifulSoup(data, 'html5lib') # seems to be well formed enough for that parser, anyway
+        soup  = bs4.BeautifulSoup(status_page, 'lxml') # seems to be well formed enough to use lxml rather than the slower html5lib
         table = soup.find('table')
-        data = [] # maybe a name like rows would be clearer?
 
+        slots = []
         for tr in table.findAll('tr')[2:]:
             #  srv      server child number - generaton
             #  pid
@@ -125,38 +116,41 @@ class Fetcher(object):
             #  ss       seconds since start of most recent requests
             #  req      milliseconds used to handle most recent request
             #  conn     kbytes transferred this connection
-            #  child    mbytes transferred this child
-            #  slot     mbytes transferred this slot
+            #  child    MBytes transferred this child
+            #  slot     MBytes transferred this slot
             #  client   
             #  protocol 
             #  vhost    
             #  request  
-            l = list( ' '.join(elem.findAll(text=True)).strip()   for elem in tr.findAll('td')) # note that that's all strings
-            for ncol in (4,5,6,7,8,9): # numeric columns
-                l[ncol] = float( l[ncol] )
+            rowvals = list( ' '.join(elem.findAll(text=True)).strip()   for elem in tr.findAll('td')) #strings;
+            for numeric_column in (4,5,6,7,8,9): # parse the ones we know are numbers into floats
+                rowvals[numeric_column] = float( rowvals[numeric_column] )
             
             sortkey = 0
             mexp = ''
-            colorf = lambda s:s
-            if l[3] in m_exp: # status
-                sortkey, mexp, colorf = m_exp[ l[3] ]
-                
-            ap = [sortkey, colorf, mexp]        
-            ap.extend( l ) # the row data
+            color_func = lambda s:s
+            if rowvals[3] in m_exp: # status
+                sortkey, mexp, color_func = m_exp[ rowvals[3] ] # status character -> those three things,  see m_exp global
+            slots.append( [sortkey, color_func, mexp] + rowvals )
             
-            data.append( ap )
-            
-        sorted_data = sorted(data, key=lambda it: (it[0],it[15],it[14]) ) # client, vhost, status(-via-sort-key-in-m_exp), pid
+        sorted_slots = sorted(slots, key=lambda it: (it[0],it[15],it[14]) ) # client, vhost, status(-via-sort-key-in-m_exp), pid
+        ret['slot_data'] = sorted_slots
 
-        ret['scoreboard_unsorted'] = list( it[6] for it in data )
-        ret['scoreboard_sorted']   = list( it[6] for it in sorted_data )
-        
-        ret['slot_data'] = sorted_data
+        ret['scoreboard_unsorted'] = list( it[6] for it in slots )
+        ret['scoreboard_sorted']   = list( it[6] for it in sorted_slots )
         
         return ret
         
     
 if __name__ == '__main__':
+    from optparse import OptionParser    
+
+    try:
+        import setproctitle
+        setproctitle.setproctitle( os.path.basename(sys.argv[0]) )
+    except ImportError:
+        pass
+
 
     # the non-wrapping code tries to show as much as it can on one line by adapting to console size changes
     cols = None
@@ -172,7 +166,6 @@ if __name__ == '__main__':
         pass
 
 
-    from optparse import OptionParser    
     p = OptionParser() 
     p.add_option("-i", "--interval-sec",
                      dest="interval", default='0.25', action="store",
@@ -199,17 +192,19 @@ if __name__ == '__main__':
 
     urlbase = 'http://%s/server-status'%host
 
-    # check reachability, to give a nicer message.
+    ## check reachability at startup, to give a nicer message
     try:
-        urlfetch(urlbase, timeout=1)
+        _urlfetch(urlbase, timeout_sec=1)
     except urllib.error.URLError:
         print( "ERROR: %r not reachable.  You may need tp specify where it is using --host.  Consider what it's listening on, and that it may be firewalled from where this is run. "%urlbase )
         sys.exit(0)
 
-    f = Fetcher( urlbase )
-         
+    fetcher = ApacheStatusFetcher( urlbase )
+
+
+    ##          
     while True:
-        status = f.fetch()
+        status = fetcher.fetch()
 
         if status == False:
             print( sc.clearscreen() )
@@ -226,42 +221,44 @@ if __name__ == '__main__':
         statrow = '   '.join(statrow)
         
         msgs = []
-        scoreboard = status['scoreboard_unsorted']
+        scoreboard = status['scoreboard_sorted'] # TODO: parameter for sorted
         unusedslots, waitingconns, workings,ourselves, closings, keepalives = 0,0,0,0,0,0
-        for sortkey,colorf,mexp,  srv, pid, acc, m, cpu, ss, req, conn, child, slot, client, protocol, vhost, request  in status['slot_data']:
 
-            ## try to declutter some string
+        slot_data = status['slot_data']
+        for sortkey,color_func,mexp,  srv, pid, acc, m, cpu, ss, req, conn, child, slot, client, protocol, vhost, request  in slot_data:
+            ### Most of the below is wrangling values for nicer formatting
+            
+            ## try to declutter the vhost string (TODO: put on parameter, you may want this fully)
             port = ''
             if ':' in vhost:
                 vhost, port = vhost.rsplit(':',1)
-
             if '.' in vhost:
                 vlist = vhost.split('.')
                 chopn = min(vchop, len(vlist)-1)
                 if chopn > 0:
                     vhost = '.'.join( vlist[:-chopn] )
-
             if (not chopport) and port!='':
                 vhost += ':'+port 
-            # CONSIDER: removing HTTP/1.1 - but this can be truncated so doesn't always match
 
+            # CONSIDER: removing HTTP/1.1 from request - but consider it can be truncated
+            
             
             ### conditionally change what to recolor, or hide completely
-            ss_s  = '%d'%ss # defaults
+            ss_s  = '%d'%ss # default values
             req_s = '%d'%req
             
             # These go first because some details are of the most recent request, not the active one, so we probably want to omit that
-            if m=='_':  # waiting - details are of the most recent request
+            if m=='_':  # waiting - any details are of the most recent request, so we want to gray most of that out
                 waitingconns += 1
-                if float(req)>300:
+                if req > 300:
                     req_s   = sc.red( '%d'%req )                
-                elif float(req)>150:
+                elif req > 150:
                     req_s   = sc.yellow( '%d'%req )                
                 client  = sc.darkgray( client  )
                 vhost   = sc.darkgray( vhost   )
                 request = sc.darkgray( request )
 
-            elif m=='.': # unused slot
+            elif m=='.': # unused slot - any details are of the most recent request, so we want to gray most of that out
                 unusedslots += 1
                 if options.show_unused:
                     req_s   = sc.darkgray( '%d'%req )
@@ -271,13 +268,13 @@ if __name__ == '__main__':
                 else:
                     continue
 
-            elif m=='K':
+            elif m=='K': # Keepalive - gray out request to indicate it's not current
                 keepalives += 1
                 req_s   = sc.darkgray( '%d'%req )
                 request = sc.darkgray( request  )
                 ss      = sc.darkgray( '%.1f'%ss  )
 
-            elif m in 'RW':
+            elif m in 'RW': # Reading request, or writing response.   Color when 'seconds since start' is large because that indicates slow request handling
                 #req is presumably always 0 because the request isn't done?
                 req_s  = ''
 
@@ -290,7 +287,7 @@ if __name__ == '__main__':
                 else:
                     ss_s = sc.darkgray( ss_s )
 
-            elif m in 'C':
+            elif m in 'C': # Closing
                 if ss > 5:
                     ss_s = sc.brightred( ss_s )
                 elif ss > 2:
@@ -307,7 +304,7 @@ if __name__ == '__main__':
                 else:
                     pass
 
-            else: # e.g. starting, closing, DNS, logging, graceful finish, idle cleanup
+            else: # e.g. starting, closing, DNS, logging, graceful finish, idle cleanup. You generally shouldn't see these much.
                 request = sc.darkgray( request )                    
                 if req > 300:
                     req_s = sc.red( '%d'%req )
@@ -328,18 +325,17 @@ if __name__ == '__main__':
             if m in ('RW'):
                 workings += 1            
 
-            ## Keep one line, if possible
-            #print( repr(request) )
-            firstbit = 83+1
+            ## Keep on one line, if possible
+            firstbit = 83+1 # the fixed-width part of that.  We mostly want to chop the request, not the rest
             if cols > firstbit:
                 request = request[ :(cols-firstbit) ]
 
-            msg = sc.cformat( # color escape code aware percent formatter (but iirc does mainly %s right now?)
+            msg = sc.cformat( # color escape code aware percent formatter (but iirc doesn't handle much beyond %s yet?)
                 '%6s %15s %s  %7s %5s   |  %15s %20s  %s',
                 (
                     sc.RESET+pid+sc.RESET,
-                    colorf(mexp)+sc.RESET,
-                    colorf(m)+sc.RESET, 
+                    color_func(mexp)+sc.RESET,
+                    color_func(m)+sc.RESET, 
                     ss_s+sc.RESET,
                     req_s+sc.RESET,
                     client+sc.RESET,
@@ -347,31 +343,25 @@ if __name__ == '__main__':
                     request+sc.RESET,
                 )
             )
-
             msgs.append( msg )
 
-        ## 
+
+        ### Build the header rows
         numcurrentslots = len(scoreboard)
         stats=['Slots:      current:%d'%numcurrentslots]
 
         s =  'waiting for conn:%3d'%waitingconns
-        if waitingconns>0:
+        if waitingconns > 0:
             s = sc.green(s)
-        elif waitingconns>3: # arbitrary
+        elif waitingconns > 3: # arbitrary
             s = sc.yellow(s)
         stats.append(s)
 
-        #s = 'probably regular connections: %2d'%problyregular
-        #stats.append(s)
-
-
         s = 'working:%2d (of which statusfetch:%2d)'%(workings, ourselves)
-        #s = sc.yellow(s)
         stats.append(s)
 
-
         s = 'keepalives:%3d'%( keepalives )
-        if keepalives>0:
+        if keepalives > 0:
             s = sc.green(s)
         else:
             s = sc.yellow(s) 
@@ -385,16 +375,16 @@ if __name__ == '__main__':
         stats.append(s)
 
         s = 'unused:%3d '%( unusedslots )
-        if unusedslots==0:
+        if unusedslots == 0:
             s = sc.red(s)
-        elif unusedslots<5: # arbitrary, maybe base on fraction istead?
+        elif unusedslots < 5: # arbitrary, maybe base on fraction instead?
             s = sc.yellow(s)
         else:
             s = sc.green(s)
         stats.append(s)
 
 
-        ##
+        ### Show everything
         print( sc.clearscreen() )
 
         print( '    '.join(stats) ) 
